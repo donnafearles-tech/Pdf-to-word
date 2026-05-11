@@ -1,0 +1,17 @@
+# Credenciales y secretos (esto evita que subas claves a GitHub)
+adobesecret.json
+.env
+*.secret
+credentials.json
+
+# Entornos virtuales de Python
+venv/
+env/
+.venv/
+
+# Archivos temporales y de sistema
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+uploads/

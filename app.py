@@ -16,6 +16,7 @@ import json
 import logging
 import tempfile
 import PyPDF2
+from docx.shared import Inches
 from dataclasses import dataclass
 from typing import Tuple, List, Optional
 
@@ -319,6 +320,40 @@ def purify_text_symbols(doc: Document) -> None:
 
     logger.info(f"Trozos de texto (runs) purificados de símbolos extraños: {cleaned_runs_count}")
 
+def normalize_margins_and_indents(doc: Document) -> None:
+    """
+    Restablece los márgenes de la página y las sangrías de los párrafos a cero.
+    Esto destruye el posicionamiento absoluto del OCR y permite que el texto 
+    fluya de forma natural de izquierda a derecha dentro de la hoja.
+    """
+    try:
+        # 1. Normalizar márgenes de página (Estándar: 1 pulgada en todos los lados)
+        for section in doc.sections:
+            section.left_margin = Inches(1)
+            section.right_margin = Inches(1)
+            section.top_margin = Inches(1)
+            section.bottom_margin = Inches(1)
+
+        # 2. Función interna para limpiar las sangrías (indents) de los párrafos
+        def reset_paragraph_format(paragraphs):
+            for p in paragraphs:
+                # Quitamos la sangría izquierda, derecha y de primera línea
+                p.paragraph_format.left_indent = None
+                p.paragraph_format.right_indent = None
+                p.paragraph_format.first_line_indent = None
+
+        # 3. Aplicar a todos los párrafos sueltos del documento
+        reset_paragraph_format(doc.paragraphs)
+
+        # 4. Aplicar a todos los párrafos que estén atrapados dentro de tablas
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    reset_paragraph_format(cell.paragraphs)
+                    
+        logger.info("Márgenes y sangrías normalizados con éxito.")
+    except Exception as e:
+        logger.error(f"Error al normalizar márgenes: {e}")
 
 def orchestrate_document_cleanup(docx_path: str, config: CleanupConfig) -> None:
     """

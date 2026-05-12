@@ -15,6 +15,7 @@ import re
 import json
 import logging
 import tempfile
+import PyPDF2
 from dataclasses import dataclass
 from typing import Tuple, List, Optional
 

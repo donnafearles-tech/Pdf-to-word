@@ -243,7 +243,8 @@ if uploaded_file is not None:
             if run_json:
                 with st.spinner("Ejecutando Adobe PDF Extract API (Esto puede tomar unos segundos)..."):
                     # Construir los parámetros para extraer texto estructurado
-                    extract_pdf_params = ExtractPDFParams.builder().with_elements_to_extract([ExtractElementType.TEXT]).build()
+                    extract_pdf_params = extract_pdf_params = ExtractPDFParams(elements_to_extract=[ExtractElementType.TEXT])
+
                     extract_job = ExtractPDFJob(doc_asset, extract_pdf_params)
                     location = pdf_services.submit(extract_job)
                     extract_response = pdf_services.get_job_result(location, ExtractPDFResult)

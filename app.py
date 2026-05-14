@@ -1,5 +1,6 @@
 # =============================================================================
 # APLICACIÓN DE CONVERSIÓN Y EXTRACCIÓN (PDF/IMAGEN A WORD / JSON)
+# CON IA GROQ INTEGRADA PARA SEMÁNTICA Y ORTOGRAFÍA
 # =============================================================================
 
 import os
@@ -7,7 +8,7 @@ import re
 import json
 import logging
 import tempfile
-import zipfile  # <-- NUEVO: Para descomprimir el resultado de Extract API
+import zipfile
 import PyPDF2
 from docx.shared import Inches
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ from docx.document import Document
 # Librerías para pre-procesamiento de orientación e imagen
 from PIL import Image, ImageOps
 
+# Importación de Groq para corrección semántica
+from groq import Groq
+
 # Importaciones de Adobe PDF Services SDK (Word / Export)
 from adobe.pdfservices.operation.auth.service_principal_credentials import ServicePrincipalCredentials
 from adobe.pdfservices.operation.pdf_services import PDFServices
@@ -32,7 +36,7 @@ from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_target_for
 from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportPDFResult
 from adobe.pdfservices.operation.pdfjobs.result.create_pdf_result import CreatePDFResult
 
-# <-- NUEVAS IMPORTACIONES: Adobe PDF Extract SDK (JSON) -->
+# Importaciones de Adobe PDF Extract SDK (JSON)
 from adobe.pdfservices.operation.pdfjobs.jobs.extract_pdf_job import ExtractPDFJob
 from adobe.pdfservices.operation.pdfjobs.params.extract_pdf.extract_pdf_params import ExtractPDFParams
 from adobe.pdfservices.operation.pdfjobs.params.extract_pdf.extract_element_type import ExtractElementType
@@ -48,17 +52,15 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CleanupConfig:
     force_single_column: bool = True
-    remove_backgrounds: bool = True
     remove_small_images: bool = True
     min_image_width_cm: float = 3.0
     min_image_height_cm: float = 3.0
     clean_weird_symbols: bool = True
-    fix_orientation: bool = True
-    # Nuevos parámetros para recorte manual
     crop_left: int = 0
     crop_right: int = 0
     crop_top: int = 0
     crop_bottom: int = 0
+    use_groq_correction: bool = False  # <-- NUEVO TOGLE PARA IA
 
 # =============================================================================
 # 2. FUNCIONES DE PRE-PROCESAMIENTO (ORIENTACIÓN Y RECORTE)
@@ -92,29 +94,23 @@ def fix_image_orientation(image_path: str) -> None:
     except Exception as e:
         logger.warning(f"Error orientación imagen: {e}")
 
-# <-- NUEVA FUNCIÓN: Recortar los 4 márgenes de la imagen -->
 def crop_image_margins(image_path: str, left: int, right: int, top: int, bottom: int) -> None:
     if left == 0 and right == 0 and top == 0 and bottom == 0:
-        return # No hay recortes solicitados
+        return
     try:
         img = Image.open(image_path)
         width, height = img.size
-        
-        # Calcular píxeles exactos a recortar según porcentaje
         x1 = int(width * (left / 100))
         y1 = int(height * (top / 100))
         x2 = width - int(width * (right / 100))
         y2 = height - int(height * (bottom / 100))
-        
         if x1 < x2 and y1 < y2:
             img_cropped = img.crop((x1, y1, x2, y2))
             img_cropped.save(image_path)
-            logger.info("Imagen recortada con éxito antes de enviar a Adobe.")
     except Exception as e:
-        logger.warning(f"Error al intentar recortar los márgenes de la imagen: {e}")
+        logger.warning(f"Error recortando imagen: {e}")
 
 def fix_pdf_orientation(pdf_path: str) -> str:
-    # Lógica original conservada para PDFs
     try:
         reader = PyPDF2.PdfReader(pdf_path)
         writer = PyPDF2.PdfWriter()
@@ -131,11 +127,11 @@ def fix_pdf_orientation(pdf_path: str) -> str:
                 writer.write(f)
             return fixed_pdf_path
         return pdf_path
-    except Exception as e:
+    except Exception:
         return pdf_path
 
 # =============================================================================
-# 3. FUNCIONES DE LIMPIEZA DOCX (Híbrido: python-docx + lxml)
+# 3. FUNCIONES DE LIMPIEZA DOCX Y GROQ IA
 # =============================================================================
 
 def force_single_column_layout(doc: Document) -> None:
@@ -149,22 +145,17 @@ def force_single_column_layout(doc: Document) -> None:
 
 def purify_text_symbols(doc: Document) -> None:
     allowed_pattern = re.compile(r'[^\w\s.,;:!?()\[\]{}"\'+\-*/=<>%$#@&^|\\~`áéíóúÁÉÍÓÚñÑüÜ¿¡€£¥°]')
-    def clean_paragraphs(paragraphs):
-        for para in paragraphs:
-            for run in para.runs:
-                if run.text:
-                    cleaned_text = allowed_pattern.sub('', run.text)
-                    cleaned_text = re.sub(r' {2,}', ' ', cleaned_text)
-                    if cleaned_text != run.text: run.text = cleaned_text
-    clean_paragraphs(doc.paragraphs)
+    for para in doc.paragraphs:
+        for run in para.runs:
+            if run.text:
+                cleaned_text = allowed_pattern.sub('', run.text)
+                cleaned_text = re.sub(r' {2,}', ' ', cleaned_text)
+                if cleaned_text != run.text: run.text = cleaned_text
 
-# --- NUEVA FUNCIÓN 1: Eliminar imágenes basura y cajas flotantes (XML) ---
 def remove_garbage_visuals(doc: Document, min_width_cm: float, min_height_cm: float) -> None:
     min_width_emu = min_width_cm * 360000
     min_height_emu = min_height_cm * 360000
-
     for drawing in doc.element.xpath('//w:drawing'):
-        # Revisar imágenes en línea
         inlines = drawing.xpath('./wp:inline')
         for inline in inlines:
             extents = inline.xpath('./wp:extent')
@@ -173,17 +164,12 @@ def remove_garbage_visuals(doc: Document, min_width_cm: float, min_height_cm: fl
                 cy = int(extents[0].get('cy', 0))
                 if cx < min_width_emu or cy < min_height_emu:
                     parent = drawing.getparent()
-                    if parent is not None:
-                        parent.remove(drawing)
-                        
-        # Revisar cajas de texto flotantes (común en escaneos con sombras)
+                    if parent is not None: parent.remove(drawing)
         anchors = drawing.xpath('./wp:anchor')
         if anchors:
             parent = drawing.getparent()
-            if parent is not None:
-                parent.remove(drawing)
+            if parent is not None: parent.remove(drawing)
 
-# --- NUEVA FUNCIÓN 2: Eliminar párrafos que solo tienen símbolos basura ---
 def remove_garbage_paragraphs(doc: Document) -> None:
     word_pattern = re.compile(r'[a-zA-Z0-9áéíóúÁÉÍÓÚñÑ]')
     for paragraph in doc.paragraphs:
@@ -194,21 +180,64 @@ def remove_garbage_paragraphs(doc: Document) -> None:
             if parent is not None:
                 parent.remove(p_element)
 
-# --- ACTUALIZACIÓN: El orquestador que ejecuta todo en cadena ---
+# --- NUEVA FUNCIÓN: CORRECCIÓN CON GROQ ---
+def correct_text_with_groq(doc: Document) -> None:
+    try:
+        api_key = st.secrets["GROQ_API_KEY"]
+        client = Groq(api_key=api_key)
+    except Exception:
+        st.warning("⚠️ No se encontró 'GROQ_API_KEY' en secrets. Saltando corrección con IA.")
+        return
+
+    progress_bar = st.progress(0)
+    total_paras = len([p for p in doc.paragraphs if len(p.text.strip()) > 10])
+    procesados = 0
+
+    for paragraph in doc.paragraphs:
+        texto_original = paragraph.text.strip()
+        
+        # Solo corregimos si hay un texto sustancial (evita mandar títulos cortos o vacíos a la IA)
+        if len(texto_original) > 10:
+            try:
+                chat_completion = client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Eres un editor experto. Corrige la ortografía, gramática y semántica del siguiente texto en español. Responde ÚNICAMENTE con el texto corregido. No añadas comillas, comentarios ni explicaciones adicionales."
+                        },
+                        {
+                            "role": "user",
+                            "content": texto_original,
+                        }
+                    ],
+                    model="llama3-8b-8192", # Modelo ultra rápido de Groq
+                    temperature=0.2,
+                )
+                texto_corregido = chat_completion.choices[0].message.content.strip()
+                paragraph.text = texto_corregido
+                
+            except Exception as e:
+                logger.warning(f"Error en IA Groq: {e}")
+            
+            procesados += 1
+            progress_bar.progress(procesados / total_paras)
+            
+    progress_bar.empty()
+
+# --- ORQUESTADOR ACTUALIZADO ---
 def orchestrate_document_cleanup(docx_path: str, config: CleanupConfig) -> None:
     doc = docx.Document(docx_path)
     
-    if config.force_single_column: 
-        force_single_column_layout(doc)
-        
-    if config.clean_weird_symbols: 
-        purify_text_symbols(doc)
-        
-    if config.remove_small_images:
-        remove_garbage_visuals(doc, config.min_image_width_cm, config.min_image_height_cm)
-        
-    # Siempre ejecutamos la limpieza de párrafos basura al final
+    if config.force_single_column: force_single_column_layout(doc)
+    if config.clean_weird_symbols: purify_text_symbols(doc)
+    if config.remove_small_images: remove_garbage_visuals(doc, config.min_image_width_cm, config.min_image_height_cm)
+    
     remove_garbage_paragraphs(doc)
+    
+    # Se ejecuta la corrección con IA si el usuario lo activó
+    if config.use_groq_correction:
+        st.info("🧠 Aplicando Inteligencia Artificial de Groq (Semántica y Ortografía)...")
+        correct_text_with_groq(doc)
         
     doc.save(docx_path)
 
@@ -221,9 +250,7 @@ config = CleanupConfig()
 
 st.sidebar.title("🛠️ Herramientas de Pre-Proceso")
 
-# <-- NUEVOS CONTROLES PARA RECORTE EN LA INTERFAZ -->
 st.sidebar.subheader("✂️ Recortar Imagen (Márgenes en %)")
-st.sidebar.markdown("<small>Aplica solo para JPG/PNG (ej. quitar engargolados)</small>", unsafe_allow_html=True)
 col_crop1, col_crop2 = st.sidebar.columns(2)
 with col_crop1:
     config.crop_left = st.number_input("Izquierda", min_value=0, max_value=50, value=0, step=1)
@@ -236,15 +263,7 @@ st.sidebar.markdown("---")
 st.sidebar.title("⚙️ Opciones de Limpieza Word")
 config.force_single_column = st.sidebar.checkbox("Forzar a 1 sola columna", value=True)
 config.clean_weird_symbols = st.sidebar.checkbox("Limpiar caracteres extraños", value=True)
-config.remove_small_images = st.sidebar.checkbox("Eliminar imágenes pequeñas", value=True)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("📐 Tamaño mínimo de imágenes (cm)")
-col_img1, col_img2 = st.sidebar.columns(2)
-with col_img1:
-    config.min_image_width_cm = st.number_input("Ancho mínimo (cm)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
-with col_img2:
-    config.min_image_height_cm = st.number_input("Alto mínimo (cm)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
+config.use_groq_correction = st.sidebar.checkbox("✨ Corrección Ortográfica y Semántica (IA Groq)", value=False) # NUEVO CHECKBOX
 
 st.title("📄 Extractor JSON & Conversor Word")
 
@@ -259,18 +278,14 @@ if uploaded_file is not None:
 
     st.info("✅ Archivo cargado. Selecciona la acción que deseas realizar:")
 
-    # <-- DOS BOTONES PARA DOS FLUJOS DISTINTOS -->
     btn_json, btn_word = st.columns(2)
-    
     run_json = btn_json.button("🧩 1. Extraer Solo JSON (Estructurado)", use_container_width=True)
     run_word = btn_word.button("🚀 2. Convertir y Limpiar a Word", use_container_width=True)
 
     if run_json or run_word:
         try:
-            # --- PASO A: PRE-PROCESAMIENTO COMPARTIDO ---
             if file_ext in ['jpg', 'jpeg', 'png']:
                 fix_image_orientation(input_path)
-                # Aplicar recorte de márgenes antes de subir
                 crop_image_margins(input_path, config.crop_left, config.crop_right, config.crop_top, config.crop_bottom)
             elif file_ext == 'pdf':
                 input_path = fix_pdf_orientation(input_path)
@@ -280,13 +295,11 @@ if uploaded_file is not None:
             credentials = ServicePrincipalCredentials(client_id=client_id, client_secret=client_secret)
             pdf_services = PDFServices(credentials=credentials)
 
-            # Subida base a Adobe
             with st.spinner("Subiendo y pre-procesando en Adobe..."):
                 with open(input_path, 'rb') as f:
                     input_stream = f.read()
                 doc_asset = pdf_services.upload(input_stream=input_stream, mime_type=media_type)
 
-                # Si es imagen, se debe encapsular en PDF antes de usar OCR o Extract
                 if media_type != PDFServicesMediaType.PDF:
                     create_pdf_job = CreatePDFJob(doc_asset)
                     location = pdf_services.submit(create_pdf_job)
@@ -295,23 +308,21 @@ if uploaded_file is not None:
 
             # --- FLUJO 1: EXTRACCIÓN DE JSON ---
             if run_json:
-                with st.spinner("Ejecutando Adobe PDF Extract API (Esto puede tomar unos segundos)..."):
-                    # Construir los parámetros para extraer texto estructurado
+                with st.spinner("Ejecutando Adobe PDF Extract API..."):
                     extract_pdf_params = ExtractPDFParams(elements_to_extract=[ExtractElementType.TEXT])
-
                     extract_job = ExtractPDFJob(input_asset=doc_asset, extract_pdf_params=extract_pdf_params)
+                    
                     location = pdf_services.submit(extract_job)
                     extract_response = pdf_services.get_job_result(location, ExtractPDFResult)
 
-                    # ExtractPDFResult devuelve directamente el ZIP, sin necesidad de get_asset()
-                    result_asset = extract_response.get_result()
+                    # SOLUCIÓN DEL ERROR DE DESCARGA ZIP APLICADA AQUÍ (.get_resource())
+                    result_asset = extract_response.get_result().get_resource()
                     stream_asset = pdf_services.get_content(result_asset)
                     
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
                         tmp_zip.write(stream_asset.get_input_stream())
                         zip_path = tmp_zip.name
 
-                # Descomprimir y obtener el JSON
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                     with zip_ref.open('structuredData.json') as json_file:
                         json_bytes = json_file.read()
@@ -325,7 +336,10 @@ if uploaded_file is not None:
             elif run_word:
                 with st.spinner("Ejecutando Exportación a Word..."):
                     export_params = ExportPDFParams(target_format=ExportPDFTargetFormat.DOCX)
-                    export_job = ExportPDFJob(doc_asset, export_params)
+                    
+                    # PREVENCIÓN DEL ERROR DE ARGUMENTOS APLICADA AQUÍ
+                    export_job = ExportPDFJob(input_asset=doc_asset, export_pdf_params=export_params)
+                    
                     location = pdf_services.submit(export_job)
                     word_response = pdf_services.get_job_result(location, ExportPDFResult)
 
@@ -336,7 +350,7 @@ if uploaded_file is not None:
                     tmp_docx.write(word_bytes)
                     word_path = tmp_docx.name
 
-                with st.spinner("Aplicando limpieza..."):
+                with st.spinner("Aplicando limpieza y procesando IA..."):
                     orchestrate_document_cleanup(word_path, config)
                     with open(word_path, "rb") as f:
                         cleaned_bytes = f.read()

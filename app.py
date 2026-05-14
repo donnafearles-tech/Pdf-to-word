@@ -135,11 +135,8 @@ def fix_pdf_orientation(pdf_path: str) -> str:
         return pdf_path
 
 # =============================================================================
-# 3. FUNCIONES DE LIMPIEZA DOCX (Mantenidas de tu código original)
+# 3. FUNCIONES DE LIMPIEZA DOCX (Híbrido: python-docx + lxml)
 # =============================================================================
-def remove_docx_backgrounds(doc: Document, parts: List) -> None:
-    # (Se mantiene tu código intacto)
-    pass 
 
 def force_single_column_layout(doc: Document) -> None:
     try:
@@ -161,10 +158,58 @@ def purify_text_symbols(doc: Document) -> None:
                     if cleaned_text != run.text: run.text = cleaned_text
     clean_paragraphs(doc.paragraphs)
 
+# --- NUEVA FUNCIÓN 1: Eliminar imágenes basura y cajas flotantes (XML) ---
+def remove_garbage_visuals(doc: Document, min_width_cm: float, min_height_cm: float) -> None:
+    min_width_emu = min_width_cm * 360000
+    min_height_emu = min_height_cm * 360000
+
+    for drawing in doc.element.xpath('//w:drawing'):
+        # Revisar imágenes en línea
+        inlines = drawing.xpath('./wp:inline')
+        for inline in inlines:
+            extents = inline.xpath('./wp:extent')
+            if extents:
+                cx = int(extents[0].get('cx', 0))
+                cy = int(extents[0].get('cy', 0))
+                if cx < min_width_emu or cy < min_height_emu:
+                    parent = drawing.getparent()
+                    if parent is not None:
+                        parent.remove(drawing)
+                        
+        # Revisar cajas de texto flotantes (común en escaneos con sombras)
+        anchors = drawing.xpath('./wp:anchor')
+        if anchors:
+            parent = drawing.getparent()
+            if parent is not None:
+                parent.remove(drawing)
+
+# --- NUEVA FUNCIÓN 2: Eliminar párrafos que solo tienen símbolos basura ---
+def remove_garbage_paragraphs(doc: Document) -> None:
+    word_pattern = re.compile(r'[a-zA-Z0-9áéíóúÁÉÍÓÚñÑ]')
+    for paragraph in doc.paragraphs:
+        text = paragraph.text.strip()
+        if text and not word_pattern.search(text):
+            p_element = paragraph._element
+            parent = p_element.getparent()
+            if parent is not None:
+                parent.remove(p_element)
+
+# --- ACTUALIZACIÓN: El orquestador que ejecuta todo en cadena ---
 def orchestrate_document_cleanup(docx_path: str, config: CleanupConfig) -> None:
     doc = docx.Document(docx_path)
-    if config.force_single_column: force_single_column_layout(doc)
-    if config.clean_weird_symbols: purify_text_symbols(doc)
+    
+    if config.force_single_column: 
+        force_single_column_layout(doc)
+        
+    if config.clean_weird_symbols: 
+        purify_text_symbols(doc)
+        
+    if config.remove_small_images:
+        remove_garbage_visuals(doc, config.min_image_width_cm, config.min_image_height_cm)
+        
+    # Siempre ejecutamos la limpieza de párrafos basura al final
+    remove_garbage_paragraphs(doc)
+        
     doc.save(docx_path)
 
 # =============================================================================
@@ -191,6 +236,15 @@ st.sidebar.markdown("---")
 st.sidebar.title("⚙️ Opciones de Limpieza Word")
 config.force_single_column = st.sidebar.checkbox("Forzar a 1 sola columna", value=True)
 config.clean_weird_symbols = st.sidebar.checkbox("Limpiar caracteres extraños", value=True)
+config.remove_small_images = st.sidebar.checkbox("Eliminar imágenes pequeñas", value=True)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📐 Tamaño mínimo de imágenes (cm)")
+col_img1, col_img2 = st.sidebar.columns(2)
+with col_img1:
+    config.min_image_width_cm = st.number_input("Ancho mínimo (cm)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
+with col_img2:
+    config.min_image_height_cm = st.number_input("Alto mínimo (cm)", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
 
 st.title("📄 Extractor JSON & Conversor Word")
 

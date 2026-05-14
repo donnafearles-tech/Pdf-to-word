@@ -249,8 +249,8 @@ if uploaded_file is not None:
                     location = pdf_services.submit(extract_job)
                     extract_response = pdf_services.get_job_result(location, ExtractPDFResult)
 
-                    # Obtener el archivo ZIP resultante
-                    result_asset = extract_response.get_result().get_asset()
+                    # ExtractPDFResult devuelve directamente el ZIP, sin necesidad de get_asset()
+                    result_asset = extract_response.get_result()
                     stream_asset = pdf_services.get_content(result_asset)
                     
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:

@@ -18,37 +18,37 @@ from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportP
 # ==========================================
 def convertir_pdf_a_word_adobe(input_pdf_path, output_docx_path, client_id, client_secret):
     """
-    Convierte un PDF a DOCX usando la API oficial de Adobe.
+    Convierte un PDF a DOCX usando la API oficial de Adobe (SDK v4).
     """
     try:
-        # Autenticación
+        # 1. Autenticación
         credentials = ServicePrincipalCredentials(
             client_id=client_id, 
             client_secret=client_secret
         )
         pdf_services = PDFServices(credentials=credentials)
 
-        # Subir el archivo a Adobe
+        # 2. Leer el PDF como bytes y subirlo
         with open(input_pdf_path, 'rb') as f:
-            asset = pdf_services.upload(input_stream=f, mime_type=PDFServicesMediaType.PDF.value)
+            pdf_bytes = f.read()
+            
+        asset = pdf_services.upload(input_stream=pdf_bytes, mime_type=PDFServicesMediaType.PDF)
 
-        # Configurar el trabajo de exportación a DOCX
+        # 3. Configurar y enviar el trabajo de exportación
         params = ExportPDFParams(target_format=ExportPDFTargetFormat.DOCX)
-        
-        # EL CAMBIO ESTÁ AQUÍ: input_asset en lugar de asset
         job = ExportPDFJob(input_asset=asset, export_pdf_params=params)
-
-        # Ejecutar y esperar resultado
         location = pdf_services.submit(job)
-        pdf_services_response = pdf_services.get_job_result(location, ExportPDFResult)
         
-        # Obtener el activo resultante
+        # 4. Obtener resultados de Adobe
+        pdf_services_response = pdf_services.get_job_result(location, ExportPDFResult)
         result_asset = pdf_services_response.get_result().get_asset()
+        
+        # 5. Extraer el contenido
         stream_asset = pdf_services.get_content(result_asset)
 
-        # Guardar el DOCX localmente
+        # 6. Guardar el archivo DOCX localmente (Solución del error)
         with open(output_docx_path, "wb") as f:
-            f.write(stream_asset.read())
+            f.write(stream_asset.get_input_stream())
             
         return True
 

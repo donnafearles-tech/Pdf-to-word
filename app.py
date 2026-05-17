@@ -109,33 +109,25 @@ def pre_limpiar_ocr(texto):
     
     return texto_limpio
 
-def limpiar_y_traducir_con_groq(texto, groq_api_key):
-    """Llama a Groq para limpiar y traducir, blindado contra fallos de red."""
+def limpiar_y_traducir_con_groq(texto, groq_api_key, max_reintentos=3):
     cliente = Groq(api_key=groq_api_key)
-    prompt_sistema = (
-        "Eres un editor editorial experto en restauración de textos escaneados.\n"
-        "1. Traduce el texto al ESPAÑOL de forma natural.\n"
-        "2. Elimina basura de escaneo: símbolos sin sentido o sílabas rotas.\n"
-        "3. Corrige la ortografía y puntuación.\n"
-        "4. Devuelve ÚNICAMENTE el texto traducido. Sin introducciones."
-    )
+    # ... tu prompt ...
     
-    try:
-        respuesta = cliente.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": texto}
-            ],
-            temperature=0.1,
-            max_tokens=1500  # Protege la cuota límite de tokens
-        )
-        return respuesta.choices[0].message.content.strip()
-    except Exception as e:
-        # Si un párrafo falla (ej. caída de red de Groq), se devuelve el original
-        # para que la aplicación no se detenga por completo.
-        st.warning(f"Aviso: Un párrafo no pudo procesarse con IA. Se mantendrá el original. Error: {str(e)}")
-        return texto
+    for intento in range(max_reintentos):
+        try:
+            respuesta = cliente.chat.completions.create(...)
+            return respuesta.choices[0].message.content.strip()
+        
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "rate limit" in error_msg or "429" in error_msg:
+                st.warning(f"⏳ Límite de Groq alcanzado. Pausando 60 segundos... (Intento {intento + 1}/{max_reintentos})")
+                time.sleep(60) # Pausa de 1 minuto para enfriar la API
+            else:
+                st.error(f"Error en IA: {e}")
+                return texto # Si es otro error, devuelve el original y sigue
+                
+    return texto # Si falla 3 veces, devuelve el original
 
 def procesar_docx_con_groq(docx_path, groq_api_key):
     """Itera sobre el Word preservando formatos, limpia imágenes basura y traduce."""

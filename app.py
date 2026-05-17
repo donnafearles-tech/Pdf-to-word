@@ -34,7 +34,9 @@ def convertir_pdf_a_word_adobe(input_pdf_path, output_docx_path, client_id, clie
 
         # Configurar el trabajo de exportación a DOCX
         params = ExportPDFParams(target_format=ExportPDFTargetFormat.DOCX)
-        job = ExportPDFJob(asset=asset, export_pdf_params=params)
+        
+        # EL CAMBIO ESTÁ AQUÍ: input_asset en lugar de asset
+        job = ExportPDFJob(input_asset=asset, export_pdf_params=params)
 
         # Ejecutar y esperar resultado
         location = pdf_services.submit(job)

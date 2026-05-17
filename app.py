@@ -29,8 +29,8 @@ def convertir_pdf_a_word_adobe(input_pdf_path, output_docx_path, client_id, clie
         pdf_services = PDFServices(credentials=credentials)
 
         # Subir el archivo a Adobe
-       with open(input_pdf_path, 'rb') as f:
-            asset = pdf_services.upload(input_stream=f, mime_type=PDFServicesMediaType.PDF.value)
+with open(input_pdf_path, 'rb') as f:
+asset = pdf_services.upload(input_stream=f, mime_type=PDFServicesMediaType.PDF.value)
 
         # Configurar el trabajo de exportación a DOCX
         params = ExportPDFParams(target_format=ExportPDFTargetFormat.DOCX)

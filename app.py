@@ -8,6 +8,15 @@ from groq import Groq
 from datetime import datetime
 
 # =====================================================================
+# IMPORTACIONES DE LANGUAGE DETECTION Y LOGGING
+# =====================================================================
+try:
+    from langdetect import detect, LangDetectException
+except ImportError:
+    st.warning("⚠️ langdetect no instalado. Las detecciones de idioma serán limitadas.")
+    detect = None
+
+# =====================================================================
 # IMPORTACIONES OFICIALES DEL SDK DE ADOBE (V4)
 # =====================================================================
 from adobe.pdfservices.operation.auth.service_principal_credentials import ServicePrincipalCredentials
@@ -129,17 +138,51 @@ def pre_limpiar_ocr(texto):
     # Colapsar espacios múltiples y saltos de línea huérfanos
     return re.sub(r'\s+', ' ', texto_limpio).strip()
 
-# =====================================================================
-# 3. MOTOR DE LIMPIEZA Y TRADUCCIÓN (GROQ) - CON BATCH PROCESSING
-# =====================================================================
-def llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3):
+def detectar_idioma_lote(textos):
     """
-    Llama a Groq con backoff exponencial inteligente.
-    - Intento 0: espera 10 segundos
-    - Intento 1: espera 20 segundos
-    - Intento 2: espera 40 segundos
-    Maneja rate limits (429) y otros errores diferenciadamente.
+    Detecta el idioma del primer párrafo válido para logging.
+    Retorna el código de idioma detectado (ej: 'en', 'es', 'de', 'fr', 'pt').
+    Fallback: 'unknown' si no se puede detectar.
     """
+    if not detect:
+        return "unknown"
+    
+    try:
+        for texto in textos:
+            if len(texto) > 20:  # Mínimo de caracteres para detección confiable
+                idioma = detect(texto)
+                return idioma
+        return "unknown"
+    except Exception as e:
+        st.debug(f"Error en detección de idioma: {e}")
+        return "unknown"
+
+# =====================================================================
+# 3. MOTOR DE LIMPIEZA Y TRADUCCIÓN (GROQ) - CON BATCH PROCESSING Y MULTIIDIOMA
+# =====================================================================
+def traducir_lote(textos_lote, groq_api_key, max_reintentos=3):
+    """
+    Recibe una lista de textos (párrafos) en cualquier idioma,
+    los traduce al español en una sola llamada a Groq.
+    Devuelve lista de textos traducidos en el mismo orden.
+    Usa separador '---SEPARADOR---' para evitar colisiones.
+    """
+    if not textos_lote:
+        return []
+    
+    # Unir los textos con un separador especial que no aparezca en el texto
+    separador = "\n---SEPARADOR---\n"
+    texto_unido = separador.join(textos_lote)
+    
+    # Prompt que fuerza la traducción al español, independientemente del idioma original
+    prompt_sistema = (
+        "Eres un traductor profesional. El usuario te dará varios párrafos en diferentes idiomas "
+        "(pueden ser alemán, portugués, francés, inglés, holandés, etc.). "
+        "Debes traducir CADA párrafo al español de forma natural, limpia y fiel al original. "
+        "Conserva el significado, corrige errores de OCR si los hay, pero NO añadas comentarios ni texto adicional. "
+        "Devuelve ÚNICAMENTE los párrafos traducidos, en el MISMO ORDEN, separados por la línea '---SEPARADOR---'."
+    )
+    
     cliente = Groq(api_key=groq_api_key)
     
     for intento in range(max_reintentos):
@@ -147,25 +190,22 @@ def llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3):
             respuesta = cliente.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Eres un editor editorial experto en restauración de textos escaneados.\n"
-                            "Se te pasarán múltiples bloques de texto separados por la línea '|||SEP|||'.\n"
-                            "Para CADA bloque:\n"
-                            "1. Traduce al ESPAÑOL de forma natural.\n"
-                            "2. Elimina basura de escaneo: símbolos sin sentido o sílabas rotas.\n"
-                            "3. Corrige la ortografía y puntuación.\n"
-                            "Devuelve cada bloque traducido separado por exactamente esta línea: '|||SEP|||'\n"
-                            "IMPORTANTE: Mantén el mismo número de bloques. Sin introducciones ni explicaciones."
-                        )
-                    },
-                    {"role": "user", "content": texto_lote}
+                    {"role": "system", "content": prompt_sistema},
+                    {"role": "user", "content": texto_unido}
                 ],
-                temperature=0.1,
-                max_tokens=3000
+                temperature=0.2,
+                max_tokens=4000
             )
-            return respuesta.choices[0].message.content.strip()
+            texto_traducido = respuesta.choices[0].message.content.strip()
+            
+            # Dividir por el separador
+            traducidos = [t.strip() for t in texto_traducido.split(separador)]
+            
+            # Si por alguna razón hay menos elementos, rellenar con originales
+            if len(traducidos) < len(textos_lote):
+                traducidos.extend(textos_lote[len(traducidos):])
+            
+            return traducidos[:len(textos_lote)]
             
         except Exception as e:
             error_msg = str(e).lower()
@@ -173,36 +213,24 @@ def llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3):
             
             if es_rate_limit and intento < max_reintentos - 1:
                 # Backoff exponencial: 2^intento * 10 (10, 20, 40 segundos)
-                tiempo_espera = (2 ** intento) * 10
-                st.warning(f"⏳ Rate limit detectado. Esperando {tiempo_espera}s... (Intento {intento + 1}/{max_reintentos})")
-                time.sleep(tiempo_espera)
+                espera = 2 ** intento * 10
+                st.warning(f"⏳ Límite de tasa detectado. Esperando {espera}s... (Intento {intento + 1}/{max_reintentos})")
+                time.sleep(espera)
             else:
                 # Error no-rate-limit o último intento agotado
                 if es_rate_limit:
-                    st.warning(f"❌ Rate limit persistente tras {max_reintentos} intentos. Se mantienen originales.")
+                    st.warning(f"❌ Límite de tasa persistente tras {max_reintentos} intentos. Se mantienen originales.")
                 else:
                     st.warning(f"⚠️ Error en API Groq: {str(e)[:100]}. Se mantienen originales.")
-                return None
+                return textos_lote  # Fallback: devolver originales
     
-    return None
-
-def limpiar_y_traducir_lote(texto_lote, groq_api_key):
-    """
-    Procesa múltiples párrafos en una sola llamada a Groq.
-    texto_lote es una cadena con párrafos separados por '\n|||SEP|||\n'
-    Retorna una lista de párrafos traducidos en el mismo orden.
-    """
-    resultado = llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3)
-    
-    if resultado is None:
-        # Retornar los párrafos originales sin procesar
-        return [p.strip() for p in texto_lote.split('|||SEP|||')]
-    
-    bloques = resultado.split('|||SEP|||')
-    return [b.strip() for b in bloques]
+    return textos_lote
 
 def procesar_docx_con_groq(docx_path, groq_api_key, tamaño_lote=5):
-    """Itera sobre el Word en lotes, reduciendo drásticamente las llamadas a API."""
+    """
+    Itera sobre el Word en lotes con traducción multiidioma.
+    Detecta idioma de entrada y registra estadísticas.
+    """
     doc = docx.Document(docx_path)
     
     texto_estado = st.empty()
@@ -214,28 +242,44 @@ def procesar_docx_con_groq(docx_path, groq_api_key, tamaño_lote=5):
     
     # 2. Pre-filtrar párrafos válidos (eliminar vacíos y solo-dígitos)
     parrafos_validos = []
-    indices_validos = []
     
-    for i, parrafo in enumerate(doc.paragraphs):
+    for parrafo in doc.paragraphs:
         texto_original = parrafo.text.strip()
         if texto_original and not texto_original.isdigit():
             parrafos_validos.append(parrafo)
-            indices_validos.append(i)
     
     if not parrafos_validos:
         st.info("No hay párrafos válidos para procesar.")
         return
     
-    # 3. Procesar en lotes
+    # 3. Detectar idioma de entrada del primer lote
+    primeros_textos = [p.text.strip() for p in parrafos_validos[:min(5, len(parrafos_validos))]]
+    idioma_origen = detectar_idioma_lote(primeros_textos)
+    
+    idioma_labels = {
+        'en': '🇬🇧 Inglés',
+        'es': '🇪🇸 Español',
+        'de': '🇩🇪 Alemán',
+        'fr': '🇫🇷 Francés',
+        'pt': '🇵🇹 Portugués',
+        'nl': '🇳🇱 Holandés',
+        'it': '🇮🇹 Italiano',
+        'unknown': '❓ Desconocido'
+    }
+    idioma_display = idioma_labels.get(idioma_origen, f"Idioma: {idioma_origen}")
+    st.info(f"🔍 Idioma detectado: {idioma_display}")
+    
+    # 4. Procesar en lotes
     barra_progreso = st.progress(0)
     total_lotes = (len(parrafos_validos) + tamaño_lote - 1) // tamaño_lote
     parrafos_procesados = 0
+    idiomas_detectados = {}
     
     for lote_idx in range(0, len(parrafos_validos), tamaño_lote):
         lote_parrafos = parrafos_validos[lote_idx:lote_idx + tamaño_lote]
         lote_numero = (lote_idx // tamaño_lote) + 1
         
-        # Construir texto del lote
+        # Construir lista de textos pre-limpios
         textos_limpios = []
         for parrafo in lote_parrafos:
             texto_pre_limpio = pre_limpiar_ocr(parrafo.text.strip())
@@ -244,19 +288,19 @@ def procesar_docx_con_groq(docx_path, groq_api_key, tamaño_lote=5):
             else:
                 textos_limpios.append("")  # Preservar orden incluso con párrafos vacíos
         
-        texto_lote = '\n|||SEP|||\n'.join(textos_limpios)
-        
-        # Procesar lote
+        # Procesar lote con traducción multiidioma
         texto_estado.text(f"Procesando lote {lote_numero}/{total_lotes}...")
-        textos_procesados = limpiar_y_traducir_lote(texto_lote, groq_api_key)
+        textos_procesados = traducir_lote(textos_limpios, groq_api_key)
         
         # Aplicar resultados al documento
         for i, parrafo in enumerate(lote_parrafos):
             if i < len(textos_procesados) and textos_procesados[i]:
+                # Preservar estilos
                 estilo_previo = None
                 if parrafo.runs and parrafo.runs[0].style:
                     estilo_previo = parrafo.runs[0].style
                 
+                # Limpiar y reescribir
                 for run in parrafo.runs:
                     run.text = ""
                 
@@ -266,7 +310,7 @@ def procesar_docx_con_groq(docx_path, groq_api_key, tamaño_lote=5):
                 
                 parrafos_procesados += 1
         
-        # Actualizar barra
+        # Actualizar progreso
         progreso = int(((lote_idx + len(lote_parrafos)) / len(parrafos_validos)) * 100)
         barra_progreso.progress(min(progreso, 100))
         
@@ -280,6 +324,9 @@ def procesar_docx_con_groq(docx_path, groq_api_key, tamaño_lote=5):
     doc.save(docx_path)
     texto_estado.text(f"✅ Completado. {parrafos_procesados} párrafos mejorados.")
     barra_progreso.empty()
+    
+    # Estadísticas finales
+    st.success(f"📊 Estadísticas: {total_lotes} lotes procesados | {parrafos_procesados} párrafos traducidos | Idioma origen: {idioma_display}")
 
 # =====================================================================
 # 4. INTERFAZ DE USUARIO Y CONTROL DE FLUJO PRINCIPAL

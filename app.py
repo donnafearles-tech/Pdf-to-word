@@ -750,7 +750,7 @@ if archivo_subido:
                         if len(texto_limpio) > 30 and not texto_limpio.isdigit():
                             texto_muestra += texto_limpio + " "
                             # Tomamos 500 caracteres para asegurar la precisión de la IA
-                            if len(texto_muestra) > 500:
+                            if len(texto_muestra) > 3500:
                                 break
                     
                     if texto_muestra:

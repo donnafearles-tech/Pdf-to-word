@@ -1,9 +1,11 @@
 import os
 import re
 import time
+import shutil
 import docx
 import streamlit as st
 from groq import Groq
+from datetime import datetime
 
 # =====================================================================
 # IMPORTACIONES OFICIALES DEL SDK DE ADOBE (V4)
@@ -24,6 +26,35 @@ st.set_page_config(
     page_icon="📚", 
     layout="centered"
 )
+
+# =====================================================================
+# FUNCIONES AUXILIARES DE GESTIÓN DE ARCHIVOS
+# =====================================================================
+def crear_carpeta_resultados():
+    """Crea la carpeta 'resultados' si no existe."""
+    carpeta = "resultados"
+    if not os.path.exists(carpeta):
+        os.makedirs(carpeta)
+    return carpeta
+
+def mover_docx_a_resultados(docx_path):
+    """
+    Mueve el DOCX procesado a la carpeta de resultados con timestamp.
+    Retorna la ruta final del archivo.
+    """
+    carpeta_resultados = crear_carpeta_resultados()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nombre_original = os.path.basename(docx_path).replace("temp_output_", "")
+    nombre_final = f"Libro_Procesado_{timestamp}.docx"
+    ruta_final = os.path.join(carpeta_resultados, nombre_final)
+    
+    try:
+        shutil.move(docx_path, ruta_final)
+        st.info(f"📁 Documento guardado en: `{ruta_final}`")
+        return ruta_final
+    except Exception as e:
+        st.warning(f"⚠️ No se pudo mover a resultados: {str(e)}")
+        return docx_path
 
 # =====================================================================
 # 1. MOTOR DE CONVERSIÓN (ADOBE SDK V4) - BLINDADO
@@ -272,6 +303,7 @@ if archivo_subido:
         id_unico = str(int(time.time()))
         temp_pdf = f"temp_input_{id_unico}.pdf"
         temp_docx = f"temp_output_{id_unico}.docx"
+        exito_total = False
         
         try:
             with open(temp_pdf, "wb") as f:
@@ -288,6 +320,7 @@ if archivo_subido:
                     
                 st.success("🎉 ¡El documento ha sido procesado y restaurado con éxito!")
                 st.balloons()
+                exito_total = True
                 
                 with open(temp_docx, "rb") as f:
                     st.download_button(
@@ -303,7 +336,28 @@ if archivo_subido:
             st.error(f"Ha ocurrido un error inesperado en la aplicación: {str(e)}")
             
         finally:
+            # SIEMPRE eliminar PDF temporal
             if os.path.exists(temp_pdf):
                 os.remove(temp_pdf)
-            if os.path.exists(temp_docx):
-                os.remove(temp_docx)
+            
+            # Gestión inteligente del DOCX
+            if exito_total and os.path.exists(temp_docx):
+                # ✅ Éxito: Mover a carpeta de resultados
+                docx_final = mover_docx_a_resultados(temp_docx)
+                st.info(f"📄 Archivo disponible en: `{docx_final}`")
+            elif os.path.exists(temp_docx):
+                # ⚠️ Fallo: Mantener DOCX para inspección en carpeta debug
+                carpeta_debug = "debug_fallos"
+                if not os.path.exists(carpeta_debug):
+                    os.makedirs(carpeta_debug)
+                ruta_debug = os.path.join(carpeta_debug, f"error_{id_unico}.docx")
+                try:
+                    shutil.copy(temp_docx, ruta_debug)
+                    st.warning(f"🔍 Documento de debug guardado en: `{ruta_debug}` para inspección")
+                except Exception:
+                    pass
+                # Eliminar el temp después de copiar
+                try:
+                    os.remove(temp_docx)
+                except Exception:
+                    pass

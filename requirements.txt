@@ -1,5 +1,7 @@
-streamlit>=1.28.0
-pdfservices-sdk>=4.0.0
-python-docx>=0.8.11
-groq
-langdetect>=1.0.9
+python >= 3.9
+streamlit >= 1.28
+python-docx >= 0.8.11
+groq >= 0.4.0
+adobe-pdfservices-sdk >= 4.0.0
+pillow >= 9.0.0
+pytesseract >= 0.3.10  # Optional: for OCR

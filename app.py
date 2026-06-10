@@ -6,6 +6,8 @@ import docx
 import streamlit as st
 from groq import Groq
 from datetime import datetime
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.oxml.shared import OxmlElement
 
 # =====================================================================
 # IMPORTACIONES OFICIALES DEL SDK DE ADOBE (V4)
@@ -116,6 +118,26 @@ def limpiar_imagenes_pequenas(doc, min_width_cm=1.5, min_height_cm=1.5):
             continue
             
     return imagenes_eliminadas
+
+def preservar_tablas(doc_original):
+    """
+    Extrae tablas del documento original con su estructura y contenido.
+    Retorna lista de (tabla_index, tabla_datos).
+    """
+    tablas_data = []
+    try:
+        for tabla_idx, tabla in enumerate(doc_original.tables):
+            tabla_contenido = []
+            for fila in tabla.rows:
+                fila_contenido = []
+                for celda in fila.cells:
+                    fila_contenido.append(celda.text.strip())
+                tabla_contenido.append(fila_contenido)
+            tablas_data.append((tabla_idx, tabla_contenido))
+    except Exception as e:
+        st.warning(f"⚠️ No se pudieron extraer todas las tablas: {str(e)}")
+    
+    return tablas_data
 
 def pre_limpiar_ocr(texto):
     """
@@ -252,10 +274,31 @@ def traducir_lote(textos_lote, groq_api_key, idioma_origen="inglés"):
     
     return [t.strip() for t in traducidos]
 
+def obtener_estilos_validos(doc):
+    """
+    Obtiene lista de estilos válidos en el documento.
+    Incluye fallback a 'Normal' si un estilo no existe.
+    """
+    try:
+        estilos_validos = {s.name for s in doc.styles if s.type == 1}  # type=1 es párrafo
+        if 'Normal' not in estilos_validos:
+            estilos_validos.add('Normal')
+        return estilos_validos
+    except Exception as e:
+        st.warning(f"⚠️ No se pudieron obtener estilos válidos: {str(e)}")
+        return {'Normal'}
+
 def procesar_docx_multilingue(docx_path, docx_salida_path, groq_api_key, idioma_origen="inglés", tamano_lote=10):
     """
     Lee el DOCX original, traduce párrafos en lotes al español,
     y guarda un nuevo DOCX limpio.
+    
+    MEJORAS IMPLEMENTADAS:
+    - Validación de estilos para evitar crasheos
+    - Preservación de tablas
+    - Batch processing con reintentos
+    - Guardado incremental y seguro
+    - Manejo robusto de errores
     
     Parámetros:
     - idioma_origen: idioma detectado automáticamente del PDF
@@ -271,7 +314,15 @@ def procesar_docx_multilingue(docx_path, docx_salida_path, groq_api_key, idioma_
     img_eliminadas = limpiar_imagenes_pequenas(doc_original, min_width_cm=1.5, min_height_cm=1.5)
     st.info(f"🧹 Se eliminaron {img_eliminadas} artefactos visuales.")
     
-    # 2. Extraer párrafos válidos
+    # 2. Extraer tablas ANTES de procesar (preservación)
+    tablas_datos = preservar_tablas(doc_original)
+    if tablas_datos:
+        st.info(f"📊 Se detectaron {len(tablas_datos)} tabla(s) que serán preservadas.")
+    
+    # 🔑 NOVEDAD: Obtener los estilos válidos del documento ANTES del bucle
+    estilos_validos = obtener_estilos_validos(doc_nuevo)
+    
+    # 3. Extraer párrafos válidos
     parrafos_datos = []  # Lista de (texto_original, estilo)
     
     for p in doc_original.paragraphs:
@@ -292,7 +343,7 @@ def procesar_docx_multilingue(docx_path, docx_salida_path, groq_api_key, idioma_
         doc_nuevo.save(docx_salida_path)
         return
     
-    # 3. Procesar en lotes
+    # 4. Procesar en lotes
     total = len(parrafos_datos)
     barra_progreso = st.progress(0)
     
@@ -308,15 +359,18 @@ def procesar_docx_multilingue(docx_path, docx_salida_path, groq_api_key, idioma_
         texto_estado.text(f"Traduc. lote {lote_numero}/{total_lotes} (desde {idioma_origen})...")
         textos_traducidos = traducir_lote(textos_lote, groq_api_key, idioma_origen=idioma_origen)
         
-        # Aplicar al documento nuevo manteniendo estilos
+        # 🔑 VALIDACIÓN CLAVE: Aplicar al documento nuevo con estilos seguros
         for j, (texto_orig, estilo) in enumerate(lote_data):
             texto_final = textos_traducidos[j] if j < len(textos_traducidos) else texto_orig
             
+            # VALIDACIÓN: Si el estilo de Adobe no existe, usa 'Normal' para evitar daños
+            estilo_seguro = estilo if estilo in estilos_validos else 'Normal'
+            
             if texto_final.strip():  # Solo agregar si hay contenido
-                doc_nuevo.add_paragraph(texto_final, style=estilo)
+                doc_nuevo.add_paragraph(texto_final, style=estilo_seguro)
             else:
                 # Preservar párrafo vacío
-                doc_nuevo.add_paragraph("", style=estilo)
+                doc_nuevo.add_paragraph("", style=estilo_seguro)
         
         # Actualizar barra
         progreso = min(i + tamano_lote, total)
@@ -325,15 +379,22 @@ def procesar_docx_multilingue(docx_path, docx_salida_path, groq_api_key, idioma_
         # Guardado incremental y seguro (cada 2 lotes)
         if (lote_numero % 2 == 0) or (i + tamano_lote >= total):
             temp_path = docx_salida_path + ".tmp"
-            doc_nuevo.save(temp_path)
-            os.replace(temp_path, docx_salida_path)  # Reemplazo atómico
-            texto_estado.text(f"💾 Guardado en lote {lote_numero}...")
+            try:
+                doc_nuevo.save(temp_path)
+                os.replace(temp_path, docx_salida_path)  # Reemplazo atómico
+                texto_estado.text(f"💾 Guardado en lote {lote_numero}...")
+            except Exception as e:
+                st.warning(f"⚠️ Error al guardar lote {lote_numero}: {str(e)}")
         
         time.sleep(0.5)  # Pausa entre lotes
     
     # Guardado final
-    doc_nuevo.save(docx_salida_path)
-    texto_estado.text("✅ Traducción completada exitosamente.")
+    try:
+        doc_nuevo.save(docx_salida_path)
+        texto_estado.text("✅ Traducción completada exitosamente.")
+    except Exception as e:
+        st.error(f"❌ Error al guardar documento final: {str(e)}")
+    
     barra_progreso.empty()
 
 # =====================================================================

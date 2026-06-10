@@ -130,17 +130,54 @@ def pre_limpiar_ocr(texto):
     return re.sub(r'\s+', ' ', texto_limpio).strip()
 
 # =====================================================================
-# 3. MOTOR DE LIMPIEZA Y TRADUCCIÓN (GROQ) - CON BATCH PROCESSING
+# 3. DETECCIÓN DE IDIOMA
 # =====================================================================
-def llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3):
+def detectar_idioma_muestra(texto_muestra, groq_api_key):
+    """
+    Detecta el idioma de una muestra de texto usando Groq.
+    Retorna el nombre del idioma en español (ej: 'inglés', 'francés', 'portugués').
+    """
+    try:
+        cliente = Groq(api_key=groq_api_key)
+        respuesta = cliente.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Responde ÚNICAMENTE con el nombre del idioma en español (ej. 'portugués', 'alemán', 'inglés', 'francés') del siguiente texto. Una sola palabra."
+                },
+                {"role": "user", "content": texto_muestra[:300]}
+            ],
+            temperature=0,
+            max_tokens=15
+        )
+        idioma_detectado = respuesta.choices[0].message.content.strip().lower()
+        return idioma_detectado
+    except Exception as e:
+        st.warning(f"⚠️ No se pudo detectar idioma: {str(e)}")
+        return "desconocido"
+
+# =====================================================================
+# 4. MOTOR DE LIMPIEZA Y TRADUCCIÓN (GROQ) - CON BATCH PROCESSING
+# =====================================================================
+def llamar_groq_con_reintento(texto_lote, groq_api_key, idioma_origen="inglés", max_reintentos=3):
     """
     Llama a Groq con backoff exponencial inteligente.
     - Intento 0: espera 10 segundos
     - Intento 1: espera 20 segundos
     - Intento 2: espera 40 segundos
     Maneja rate limits (429) y otros errores diferenciadamente.
+    
+    Parámetros:
+    - idioma_origen: idioma detectado del PDF (ej: 'inglés', 'francés', 'portugués')
     """
     cliente = Groq(api_key=groq_api_key)
+    
+    # Construcción dinámicas del prompt según idioma origen
+    if idioma_origen.lower() == "español":
+        instruccion_traduccion = "Mantén el texto en ESPAÑOL. Solo corrige ortografía, elimina basura de OCR."
+    else:
+        instruccion_traduccion = f"Traduce del {idioma_origen} al ESPAÑOL de forma natural."
     
     for intento in range(max_reintentos):
         try:
@@ -151,12 +188,13 @@ def llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3):
                         "role": "system",
                         "content": (
                             "Eres un editor editorial experto en restauración de textos escaneados.\n"
+                            f"{instruccion_traduccion}\n"
                             "Se te pasarán múltiples bloques de texto separados por exactamente: '<<BLOCK_SEPARATOR>>'\n"
                             "Para CADA bloque:\n"
-                            "1. Traduce al ESPAÑOL de forma natural.\n"
+                            "1. Realiza la traducción/corrección.\n"
                             "2. Elimina basura de escaneo: símbolos sin sentido o sílabas rotas.\n"
                             "3. Corrige la ortografía y puntuación.\n"
-                            "Devuelve cada bloque traducido separado por exactamente: '<<BLOCK_SEPARATOR>>'\n"
+                            "Devuelve cada bloque separado por exactamente: '<<BLOCK_SEPARATOR>>'\n"
                             "IMPORTANTE: Mantén el mismo número de bloques. Sin introducciones ni explicaciones."
                         )
                     },
@@ -186,9 +224,9 @@ def llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3):
     
     return None
 
-def traducir_lote(textos_lote, groq_api_key):
+def traducir_lote(textos_lote, groq_api_key, idioma_origen="inglés"):
     """
-    Traduce una lista de textos al español usando Groq.
+    Traduce una lista de textos usando Groq.
     Retorna una lista de textos traducidos (o originales si falla).
     """
     if not textos_lote or all(not t.strip() for t in textos_lote):
@@ -198,7 +236,7 @@ def traducir_lote(textos_lote, groq_api_key):
     DELIMITER = "\n<<BLOCK_SEPARATOR>>\n"
     texto_combinado = DELIMITER.join(textos_lote)
     
-    resultado = llamar_groq_con_reintento(texto_combinado, groq_api_key, max_reintentos=3)
+    resultado = llamar_groq_con_reintento(texto_combinado, groq_api_key, idioma_origen=idioma_origen, max_reintentos=3)
     
     if resultado is None:
         # Retornar textos originales sin modificar
@@ -214,17 +252,14 @@ def traducir_lote(textos_lote, groq_api_key):
     
     return [t.strip() for t in traducidos]
 
-def procesar_docx_multilingue(docx_path, docx_salida_path, groq_api_key, tamano_lote=10):
+def procesar_docx_multilingue(docx_path, docx_salida_path, groq_api_key, idioma_origen="inglés", tamano_lote=10):
     """
     Lee el DOCX original, traduce párrafos en lotes al español,
     y guarda un nuevo DOCX limpio.
     
-    MEJORAS vs. procesar_docx_con_groq():
-    - Crea un documento NUEVO (mejor separación de original)
-    - Preserva estilos de párrafo completos
-    - Manejo robusto de párrafos vacíos
-    - Delimitador más seguro (<<BLOCK_SEPARATOR>>)
-    - Guardado atómico cada 2 lotes
+    Parámetros:
+    - idioma_origen: idioma detectado automáticamente del PDF
+    - tamano_lote: número de párrafos por lote (default: 10)
     """
     doc_original = docx.Document(docx_path)
     doc_nuevo = docx.Document()  # Documento limpio nuevo
@@ -269,9 +304,9 @@ def procesar_docx_multilingue(docx_path, docx_salida_path, groq_api_key, tamano_
         # Extraer solo textos del lote
         textos_lote = [t[0] for t in lote_data]
         
-        # Traducir lote
-        texto_estado.text(f"Traduc. lote {lote_numero}/{total_lotes}...")
-        textos_traducidos = traducir_lote(textos_lote, groq_api_key)
+        # Traducir lote (pasando idioma origen)
+        texto_estado.text(f"Traduc. lote {lote_numero}/{total_lotes} (desde {idioma_origen})...")
+        textos_traducidos = traducir_lote(textos_lote, groq_api_key, idioma_origen=idioma_origen)
         
         # Aplicar al documento nuevo manteniendo estilos
         for j, (texto_orig, estilo) in enumerate(lote_data):
@@ -302,7 +337,7 @@ def procesar_docx_multilingue(docx_path, docx_salida_path, groq_api_key, tamano_
     barra_progreso.empty()
 
 # =====================================================================
-# 4. INTERFAZ DE USUARIO Y CONTROL DE FLUJO PRINCIPAL
+# 5. INTERFAZ DE USUARIO Y CONTROL DE FLUJO PRINCIPAL
 # =====================================================================
 st.title("Conversor Editorial: PDF a Word Limpio")
 st.markdown("Sube tus archivos **PDF escaneados** para convertirlos a **Word**, traducirlos al español y remover ruido de OCR.")
@@ -335,11 +370,30 @@ if archivo_subido:
                 )
                 
             if exito_adobe:
+                # Detectar idioma del documento
+                with st.spinner("🔍 Detectando idioma del documento..."):
+                    doc_temp = docx.Document(temp_docx)
+                    # Extraer muestra de texto (primeros párrafos no vacíos)
+                    texto_muestra = ""
+                    for p in doc_temp.paragraphs[:10]:
+                        if p.text.strip():
+                            texto_muestra += p.text.strip() + " "
+                            if len(texto_muestra) > 300:
+                                break
+                    
+                    if texto_muestra:
+                        idioma_detectado = detectar_idioma_muestra(texto_muestra, GROQ_API_KEY)
+                        st.info(f"🌍 Idioma detectado: **{idioma_detectado.capitalize()}**")
+                    else:
+                        idioma_detectado = "inglés"
+                        st.warning("⚠️ No se pudo detectar idioma. Asumiendo inglés.")
+                
                 with st.spinner("Fase 2/2: Traduciendo a español y limpiando ruido de OCR..."):
                     procesar_docx_multilingue(
                         docx_path=temp_docx,
                         docx_salida_path=temp_docx,  # Sobrescribe con documento limpio
                         groq_api_key=GROQ_API_KEY,
+                        idioma_origen=idioma_detectado,
                         tamano_lote=10
                     )
                     

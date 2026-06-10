@@ -4,3 +4,4 @@ groq>=0.4.0
 pdfservices-sdk>=4.0.0
 pillow>=9.0.0
 pytesseract>=0.3.10
+langdetect

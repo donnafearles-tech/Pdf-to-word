@@ -406,7 +406,7 @@ def detectar_idioma_muestra(texto_muestra, groq_api_key):
                     "content": "Eres un lingüista experto. Tu única tarea es identificar el idioma del texto (que puede tener ruido de escáner OCR). Responde EXCLUSIVAMENTE con el nombre del idioma en español. Una sola palabra, todo en minúsculas y sin puntuación final. Ejemplos válidos: portugués, italiano, español, inglés, alemán."
                 },
                 # Aquí está la magia: le enviamos un bloque masivo de texto, no solo 300 letras
-                {"role": "user", "content": texto_muestra[:1500]}
+                {"role": "user", "content": texto_muestra[:2500]}
             ],
             temperature=0, # Temperatura 0 para que sea analítico y no creativo
             max_tokens=10

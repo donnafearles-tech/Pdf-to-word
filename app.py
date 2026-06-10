@@ -403,14 +403,19 @@ def detectar_idioma_muestra(texto_muestra, groq_api_key):
             messages=[
                 {
                     "role": "system",
-                    "content": "Responde ÚNICAMENTE con el nombre del idioma en español (ej. 'portugués', 'alemán', 'inglés', 'francés') del siguiente texto. Una sola palabra."
+                    "content": "Eres un lingüista experto. Tu única tarea es identificar el idioma del texto (que puede tener ruido de escáner OCR). Responde EXCLUSIVAMENTE con el nombre del idioma en español. Una sola palabra, todo en minúsculas y sin puntuación final. Ejemplos válidos: portugués, italiano, español, inglés, alemán."
                 },
-                {"role": "user", "content": texto_muestra[:300]}
+                # Aquí está la magia: le enviamos un bloque masivo de texto, no solo 300 letras
+                {"role": "user", "content": texto_muestra[:1500]}
             ],
-            temperature=0,
-            max_tokens=15
+            temperature=0, # Temperatura 0 para que sea analítico y no creativo
+            max_tokens=10
         )
         idioma_detectado = respuesta.choices[0].message.content.strip().lower()
+        
+        # Filtro extra de seguridad: quitar puntos o símbolos raros que la IA a veces añade
+        idioma_detectado = re.sub(r'[^a-záéíóúñ]', '', idioma_detectado)
+        
         return idioma_detectado
     except Exception as e:
         st.warning(f"⚠️ No se pudo detectar idioma: {str(e)}")

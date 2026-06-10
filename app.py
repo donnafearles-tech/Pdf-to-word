@@ -101,52 +101,74 @@ def pre_limpiar_ocr(texto):
 # =====================================================================
 # 3. MOTOR DE LIMPIEZA Y TRADUCCIÓN (GROQ) - CON BATCH PROCESSING
 # =====================================================================
-def limpiar_y_traducir_lote(texto_lote, groq_api_key, max_reintentos=3):
+def llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3):
     """
-    Procesa múltiples párrafos en una sola llamada a Groq.
-    texto_lote es una cadena con párrafos separados por '\n|||SEP|||\n'
-    Retorna una lista de párrafos traducidos en el mismo orden.
+    Llama a Groq con backoff exponencial inteligente.
+    - Intento 0: espera 10 segundos
+    - Intento 1: espera 20 segundos
+    - Intento 2: espera 40 segundos
+    Maneja rate limits (429) y otros errores diferenciadamente.
     """
     cliente = Groq(api_key=groq_api_key)
-    prompt_sistema = (
-        "Eres un editor editorial experto en restauración de textos escaneados.\n"
-        "Se te pasarán múltiples bloques de texto separados por la línea '|||SEP|||'.\n"
-        "Para CADA bloque:\n"
-        "1. Traduce al ESPAÑOL de forma natural.\n"
-        "2. Elimina basura de escaneo: símbolos sin sentido o sílabas rotas.\n"
-        "3. Corrige la ortografía y puntuación.\n"
-        "Devuelve cada bloque traducido separado por exactamente esta línea: '|||SEP|||'\n"
-        "IMPORTANTE: Mantén el mismo número de bloques. Sin introducciones ni explicaciones."
-    )
     
     for intento in range(max_reintentos):
         try:
             respuesta = cliente.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=[
-                    {"role": "system", "content": prompt_sistema},
+                    {
+                        "role": "system",
+                        "content": (
+                            "Eres un editor editorial experto en restauración de textos escaneados.\n"
+                            "Se te pasarán múltiples bloques de texto separados por la línea '|||SEP|||'.\n"
+                            "Para CADA bloque:\n"
+                            "1. Traduce al ESPAÑOL de forma natural.\n"
+                            "2. Elimina basura de escaneo: símbolos sin sentido o sílabas rotas.\n"
+                            "3. Corrige la ortografía y puntuación.\n"
+                            "Devuelve cada bloque traducido separado por exactamente esta línea: '|||SEP|||'\n"
+                            "IMPORTANTE: Mantén el mismo número de bloques. Sin introducciones ni explicaciones."
+                        )
+                    },
                     {"role": "user", "content": texto_lote}
                 ],
                 temperature=0.1,
-                max_tokens=3000  # Incrementado para lotes
+                max_tokens=3000
             )
-            resultado = respuesta.choices[0].message.content.strip()
-            bloques = resultado.split('|||SEP|||')
-            return [b.strip() for b in bloques]
+            return respuesta.choices[0].message.content.strip()
             
         except Exception as e:
             error_msg = str(e).lower()
-            if "rate limit" in error_msg or "429" in error_msg:
-                tiempo_espera = 60 * (intento + 1)  # Backoff exponencial
-                st.warning(f"⏳ Cuota de Groq saturada. Esperando {tiempo_espera}s... (Intento {intento + 1}/{max_reintentos})")
+            es_rate_limit = "rate limit" in error_msg or "429" in error_msg
+            
+            if es_rate_limit and intento < max_reintentos - 1:
+                # Backoff exponencial: 2^intento * 10 (10, 20, 40 segundos)
+                tiempo_espera = (2 ** intento) * 10
+                st.warning(f"⏳ Rate limit detectado. Esperando {tiempo_espera}s... (Intento {intento + 1}/{max_reintentos})")
                 time.sleep(tiempo_espera)
             else:
-                st.warning(f"Aviso: Error en lote. Se mantendrán los originales. Error: {str(e)}")
-                # Retornar los párrafos originales sin procesar
-                return [p.strip() for p in texto_lote.split('|||SEP|||')]
+                # Error no-rate-limit o último intento agotado
+                if es_rate_limit:
+                    st.warning(f"❌ Rate limit persistente tras {max_reintentos} intentos. Se mantienen originales.")
+                else:
+                    st.warning(f"⚠️ Error en API Groq: {str(e)[:100]}. Se mantienen originales.")
+                return None
     
-    # Si agota reintentos, retornar originales
-    return [p.strip() for p in texto_lote.split('|||SEP|||')]
+    return None
+
+def limpiar_y_traducir_lote(texto_lote, groq_api_key):
+    """
+    Procesa múltiples párrafos en una sola llamada a Groq.
+    texto_lote es una cadena con párrafos separados por '\n|||SEP|||\n'
+    Retorna una lista de párrafos traducidos en el mismo orden.
+    """
+    resultado = llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3)
+    
+    if resultado is None:
+        # Retornar los párrafos originales sin procesar
+        return [p.strip() for p in texto_lote.split('|||SEP|||')]
+    
+    bloques = resultado.split('|||SEP|||')
+    return [b.strip() for b in bloques]
 
 def procesar_docx_con_groq(docx_path, groq_api_key, tamaño_lote=5):
     """Itera sobre el Word en lotes, reduciendo drásticamente las llamadas a API."""

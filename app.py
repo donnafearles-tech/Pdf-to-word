@@ -742,16 +742,31 @@ if archivo_subido:
             if exito_adobe:
                 with st.spinner("🔍 Detectando idioma del documento..."):
                     doc_temp = docx.Document(temp_docx)
-                    texto_muestra = ""
-                    # Iterar hasta encontrar texto real para mejor precisión
+                    
+                    parrafos_validos = []
+                    # 1. Recopilamos los primeros 25 párrafos con contenido real
                     for p in doc_temp.paragraphs:
                         texto_limpio = p.text.strip()
                         # Ignoramos párrafos cortos o que sean solo números
                         if len(texto_limpio) > 30 and not texto_limpio.isdigit():
-                            texto_muestra += texto_limpio + " "
-                            # Tomamos 500 caracteres para asegurar la precisión de la IA
-                            if len(texto_muestra) > 3500:
+                            parrafos_validos.append(texto_limpio)
+                            if len(parrafos_validos) > 25:
                                 break
+                    
+                    # 2. LA MAGIA (SALTO DE PORTADA): 
+                    # Ignoramos los primeros 10 párrafos (portada en francés, legales, etc.)
+                    # y unimos el resto para enviarlo a la IA.
+                    if len(parrafos_validos) > 10:
+                        texto_muestra = " ".join(parrafos_validos[10:])
+                    else:
+                        texto_muestra = " ".join(parrafos_validos)
+                    
+                    if texto_muestra:
+                        idioma_detectado = detectar_idioma_muestra(texto_muestra, GROQ_API_KEY)
+                        st.info(f"🌍 Idioma detectado: **{idioma_detectado.capitalize()}**")
+                    else:
+                        idioma_detectado = "inglés"
+                        st.warning("⚠️ No se pudo detectar idioma. Asumiendo inglés.")
                     
                     if texto_muestra:
                         idioma_detectado = detectar_idioma_muestra(texto_muestra, GROQ_API_KEY)

@@ -151,12 +151,12 @@ def llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3):
                         "role": "system",
                         "content": (
                             "Eres un editor editorial experto en restauración de textos escaneados.\n"
-                            "Se te pasarán múltiples bloques de texto separados por la línea '|||SEP|||'.\n"
+                            "Se te pasarán múltiples bloques de texto separados por exactamente: '<<BLOCK_SEPARATOR>>'\n"
                             "Para CADA bloque:\n"
                             "1. Traduce al ESPAÑOL de forma natural.\n"
                             "2. Elimina basura de escaneo: símbolos sin sentido o sílabas rotas.\n"
                             "3. Corrige la ortografía y puntuación.\n"
-                            "Devuelve cada bloque traducido separado por exactamente esta línea: '|||SEP|||'\n"
+                            "Devuelve cada bloque traducido separado por exactamente: '<<BLOCK_SEPARATOR>>'\n"
                             "IMPORTANTE: Mantén el mismo número de bloques. Sin introducciones ni explicaciones."
                         )
                     },
@@ -186,99 +186,119 @@ def llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3):
     
     return None
 
-def limpiar_y_traducir_lote(texto_lote, groq_api_key):
+def traducir_lote(textos_lote, groq_api_key):
     """
-    Procesa múltiples párrafos en una sola llamada a Groq.
-    texto_lote es una cadena con párrafos separados por '\n|||SEP|||\n'
-    Retorna una lista de párrafos traducidos en el mismo orden.
+    Traduce una lista de textos al español usando Groq.
+    Retorna una lista de textos traducidos (o originales si falla).
     """
-    resultado = llamar_groq_con_reintento(texto_lote, groq_api_key, max_reintentos=3)
+    if not textos_lote or all(not t.strip() for t in textos_lote):
+        return textos_lote
+    
+    # Unir textos con delimitador único y seguro
+    DELIMITER = "\n<<BLOCK_SEPARATOR>>\n"
+    texto_combinado = DELIMITER.join(textos_lote)
+    
+    resultado = llamar_groq_con_reintento(texto_combinado, groq_api_key, max_reintentos=3)
     
     if resultado is None:
-        # Retornar los párrafos originales sin procesar
-        return [p.strip() for p in texto_lote.split('|||SEP|||')]
+        # Retornar textos originales sin modificar
+        return textos_lote
     
-    bloques = resultado.split('|||SEP|||')
-    return [b.strip() for b in bloques]
+    # Dividir resultado manteniendo el orden
+    traducidos = resultado.split(DELIMITER)
+    
+    # Si la división falla (delimitador no se preservó), retornar originales
+    if len(traducidos) != len(textos_lote):
+        st.warning(f"⚠️ Integridad de separadores comprometida. Se mantienen originales.")
+        return textos_lote
+    
+    return [t.strip() for t in traducidos]
 
-def procesar_docx_con_groq(docx_path, groq_api_key, tamaño_lote=5):
-    """Itera sobre el Word en lotes, reduciendo drásticamente las llamadas a API."""
-    doc = docx.Document(docx_path)
+def procesar_docx_multilingue(docx_path, docx_salida_path, groq_api_key, tamano_lote=10):
+    """
+    Lee el DOCX original, traduce párrafos en lotes al español,
+    y guarda un nuevo DOCX limpio.
     
+    MEJORAS vs. procesar_docx_con_groq():
+    - Crea un documento NUEVO (mejor separación de original)
+    - Preserva estilos de párrafo completos
+    - Manejo robusto de párrafos vacíos
+    - Delimitador más seguro (<<BLOCK_SEPARATOR>>)
+    - Guardado atómico cada 2 lotes
+    """
+    doc_original = docx.Document(docx_path)
+    doc_nuevo = docx.Document()  # Documento limpio nuevo
+    
+    # 1. Purgar imágenes pequeñas del doc original
     texto_estado = st.empty()
-    texto_estado.text("Fase 2a: Purgando imágenes minúsculas y ruido visual de escaneo...")
+    texto_estado.text("Limpiando imágenes y artefactos de escaneo...")
     
-    # 1. Purgar imágenes inútiles primero
-    img_eliminadas = limpiar_imagenes_pequenas(doc, min_width_cm=1.5, min_height_cm=1.5)
-    st.info(f"🧹 Se eliminaron {img_eliminadas} artefactos visuales/imágenes pequeñas.")
+    img_eliminadas = limpiar_imagenes_pequenas(doc_original, min_width_cm=1.5, min_height_cm=1.5)
+    st.info(f"🧹 Se eliminaron {img_eliminadas} artefactos visuales.")
     
-    # 2. Pre-filtrar párrafos válidos (eliminar vacíos y solo-dígitos)
-    parrafos_validos = []
-    indices_validos = []
+    # 2. Extraer párrafos válidos
+    parrafos_datos = []  # Lista de (texto_original, estilo)
     
-    for i, parrafo in enumerate(doc.paragraphs):
-        texto_original = parrafo.text.strip()
-        if texto_original and not texto_original.isdigit():
-            parrafos_validos.append(parrafo)
-            indices_validos.append(i)
+    for p in doc_original.paragraphs:
+        texto = p.text.strip()
+        estilo = p.style.name if p.style else 'Normal'
+        
+        if texto and not texto.isdigit():  # Solo párrafos con contenido
+            # Pre-limpiar OCR
+            texto_limpio = pre_limpiar_ocr(texto)
+            if len(texto_limpio) > 3:
+                parrafos_datos.append((texto_limpio, estilo))
+        else:
+            # Preservar párrafo vacío para mantener espaciado
+            parrafos_datos.append(("", estilo))
     
-    if not parrafos_validos:
+    if not parrafos_datos:
         st.info("No hay párrafos válidos para procesar.")
+        doc_nuevo.save(docx_salida_path)
         return
     
     # 3. Procesar en lotes
+    total = len(parrafos_datos)
     barra_progreso = st.progress(0)
-    total_lotes = (len(parrafos_validos) + tamaño_lote - 1) // tamaño_lote
-    parrafos_procesados = 0
     
-    for lote_idx in range(0, len(parrafos_validos), tamaño_lote):
-        lote_parrafos = parrafos_validos[lote_idx:lote_idx + tamaño_lote]
-        lote_numero = (lote_idx // tamaño_lote) + 1
+    for i in range(0, total, tamano_lote):
+        lote_data = parrafos_datos[i:i+tamano_lote]
+        lote_numero = (i // tamano_lote) + 1
+        total_lotes = (total + tamano_lote - 1) // tamano_lote
         
-        # Construir texto del lote
-        textos_limpios = []
-        for parrafo in lote_parrafos:
-            texto_pre_limpio = pre_limpiar_ocr(parrafo.text.strip())
-            if len(texto_pre_limpio) > 3:
-                textos_limpios.append(texto_pre_limpio)
+        # Extraer solo textos del lote
+        textos_lote = [t[0] for t in lote_data]
+        
+        # Traducir lote
+        texto_estado.text(f"Traduc. lote {lote_numero}/{total_lotes}...")
+        textos_traducidos = traducir_lote(textos_lote, groq_api_key)
+        
+        # Aplicar al documento nuevo manteniendo estilos
+        for j, (texto_orig, estilo) in enumerate(lote_data):
+            texto_final = textos_traducidos[j] if j < len(textos_traducidos) else texto_orig
+            
+            if texto_final.strip():  # Solo agregar si hay contenido
+                doc_nuevo.add_paragraph(texto_final, style=estilo)
             else:
-                textos_limpios.append("")  # Preservar orden incluso con párrafos vacíos
-        
-        texto_lote = '\n|||SEP|||\n'.join(textos_limpios)
-        
-        # Procesar lote
-        texto_estado.text(f"Procesando lote {lote_numero}/{total_lotes}...")
-        textos_procesados = limpiar_y_traducir_lote(texto_lote, groq_api_key)
-        
-        # Aplicar resultados al documento
-        for i, parrafo in enumerate(lote_parrafos):
-            if i < len(textos_procesados) and textos_procesados[i]:
-                estilo_previo = None
-                if parrafo.runs and parrafo.runs[0].style:
-                    estilo_previo = parrafo.runs[0].style
-                
-                for run in parrafo.runs:
-                    run.text = ""
-                
-                nuevo_run = parrafo.add_run(textos_procesados[i])
-                if estilo_previo:
-                    nuevo_run.style = estilo_previo
-                
-                parrafos_procesados += 1
+                # Preservar párrafo vacío
+                doc_nuevo.add_paragraph("", style=estilo)
         
         # Actualizar barra
-        progreso = int(((lote_idx + len(lote_parrafos)) / len(parrafos_validos)) * 100)
-        barra_progreso.progress(min(progreso, 100))
+        progreso = min(i + tamano_lote, total)
+        barra_progreso.progress(progreso / total)
         
-        # Guardado incremental cada 3 lotes
-        if lote_idx > 0 and (lote_idx // tamaño_lote) % 3 == 0:
-            doc.save(docx_path)
-            texto_estado.text(f"💾 Guardado incremental en lote {lote_numero}...")
+        # Guardado incremental y seguro (cada 2 lotes)
+        if (lote_numero % 2 == 0) or (i + tamano_lote >= total):
+            temp_path = docx_salida_path + ".tmp"
+            doc_nuevo.save(temp_path)
+            os.replace(temp_path, docx_salida_path)  # Reemplazo atómico
+            texto_estado.text(f"💾 Guardado en lote {lote_numero}...")
         
-        time.sleep(1)  # Pausa moderada entre lotes
+        time.sleep(0.5)  # Pausa entre lotes
     
-    doc.save(docx_path)
-    texto_estado.text(f"✅ Completado. {parrafos_procesados} párrafos mejorados.")
+    # Guardado final
+    doc_nuevo.save(docx_salida_path)
+    texto_estado.text("✅ Traducción completada exitosamente.")
     barra_progreso.empty()
 
 # =====================================================================
@@ -315,8 +335,13 @@ if archivo_subido:
                 )
                 
             if exito_adobe:
-                with st.spinner("Fase 2/2: Inicializando Inteligencia Artificial para limpieza..."):
-                    procesar_docx_con_groq(temp_docx, GROQ_API_KEY)
+                with st.spinner("Fase 2/2: Traduciendo a español y limpiando ruido de OCR..."):
+                    procesar_docx_multilingue(
+                        docx_path=temp_docx,
+                        docx_salida_path=temp_docx,  # Sobrescribe con documento limpio
+                        groq_api_key=GROQ_API_KEY,
+                        tamano_lote=10
+                    )
                     
                 st.success("🎉 ¡El documento ha sido procesado y restaurado con éxito!")
                 st.balloons()

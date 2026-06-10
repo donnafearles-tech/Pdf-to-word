@@ -688,10 +688,14 @@ if archivo_subido:
                 with st.spinner("🔍 Detectando idioma del documento..."):
                     doc_temp = docx.Document(temp_docx)
                     texto_muestra = ""
-                    for p in doc_temp.paragraphs[:10]:
-                        if p.text.strip():
-                            texto_muestra += p.text.strip() + " "
-                            if len(texto_muestra) > 300:
+                    # Quitamos el [:10] para iterar hasta encontrar texto real
+                    for p in doc_temp.paragraphs:
+                        texto_limpio = p.text.strip()
+                        # Ignoramos párrafos cortos o que sean solo números
+                        if len(texto_limpio) > 30 and not texto_limpio.isdigit():
+                            texto_muestra += texto_limpio + " "
+                            # Tomamos 500 caracteres para asegurar la precisión de la IA
+                            if len(texto_muestra) > 500:
                                 break
                     
                     if texto_muestra:

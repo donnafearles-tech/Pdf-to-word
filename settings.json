@@ -1,0 +1,13 @@
+{
+  "tamano_lote": 10,
+  "max_reintentos": 3,
+  "min_width_cm": 1.5,
+  "min_height_cm": 1.5,
+  "inter_lote_sleep": 0.5,
+  "save_frequency": 2,
+  "image_compression_quality": 85,
+  "image_compression_threshold_cm": 3.0,
+  "preserve_formatting": true,
+  "enable_ocr_on_images": false,
+  "ocr_language": "spa+eng"
+}

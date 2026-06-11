@@ -643,7 +643,6 @@ with st.sidebar:
         if st.button("💾 Resetear Defaults"):
             guardar_config(DEFAULT_CONFIG)
             st.session_state.resultado = None
-            st.rerun()
     
     st.divider()
     st.subheader("Parámetros Batch")
